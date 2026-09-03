@@ -1,9 +1,16 @@
 package com.rustore.dl
 
+import android.Manifest
+import android.content.pm.PackageManager
+import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.app.NotificationManagerCompat
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.ViewModelProvider
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -18,13 +25,18 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.InstallMobile
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
+import androidx.compose.material.icons.filled.SystemUpdate
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Badge
+import androidx.compose.material3.BadgedBox
 import androidx.compose.material3.Button
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
 import androidx.compose.material3.NavigationBarItem
@@ -32,6 +44,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -46,7 +59,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 
@@ -60,14 +75,113 @@ private fun ruStoreColorScheme() = darkColorScheme(
     secondary = Color(0xFF5DAEFF),
 )
 
+@Composable
+private fun GlobalDownloadBar(
+    download: DownloadUiState,
+    modifier: Modifier = Modifier,
+) {
+    Surface(
+        modifier = modifier.fillMaxWidth(),
+        color = MaterialTheme.colorScheme.surfaceContainer,
+    ) {
+        Column(modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Text(
+                    text = download.appName ?: download.packageName.orEmpty(),
+                    style = MaterialTheme.typography.labelLarge,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                download.progressPercent?.let { percent ->
+                    Text(
+                        text = "$percent%",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(start = 8.dp),
+                    )
+                }
+            }
+            download.status?.let { status ->
+                Text(
+                    text = status,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.padding(top = 2.dp),
+                )
+            }
+            val percent = download.progressPercent
+            if (percent != null) {
+                LinearProgressIndicator(
+                    progress = { percent / 100f },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 6.dp),
+                )
+            } else {
+                LinearProgressIndicator(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 6.dp),
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun BadgedIcon(icon: ImageVector, count: Int) {
+    if (count > 0) {
+        BadgedBox(badge = { Badge { Text(count.toString()) } }) {
+            Icon(icon, contentDescription = null)
+        }
+    } else {
+        Icon(icon, contentDescription = null)
+    }
+}
+
 class MainActivity : ComponentActivity() {
+    private val notificationPermissionLauncher =
+        registerForActivityResult(ActivityResultContracts.RequestPermission()) { }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        requestNotificationPermissionIfNeeded()
         setContent {
             MaterialTheme(colorScheme = ruStoreColorScheme()) {
                 MainScreen()
             }
+        }
+    }
+
+    private fun requestNotificationPermissionIfNeeded() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) {
+            return
+        }
+        val granted = ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.POST_NOTIFICATIONS,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!granted) {
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        // The app is now visible to the user, so the lingering "download complete"
+        // notification is redundant — dismiss it (but never touch an in-progress
+        // download's notification, which backs the foreground service).
+        val viewModel = ViewModelProvider(this, MainViewModel.Factory(this))[MainViewModel::class.java]
+        if (!viewModel.uiState.value.download.isActive) {
+            NotificationManagerCompat.from(this).cancel(DownloadService.NOTIFICATION_ID)
         }
     }
 }
@@ -130,23 +244,53 @@ fun MainScreen() {
                             Icon(Icons.Default.Delete, contentDescription = "Clear history")
                         }
                     }
+                    if (uiState.selectedTab == MainTab.Updates) {
+                        IconButton(
+                            onClick = { viewModel.checkForUpdates(context.applicationContext) },
+                            enabled = !uiState.updates.isChecking,
+                        ) {
+                            Icon(Icons.Default.Refresh, contentDescription = "Check for updates")
+                        }
+                    }
                 },
             )
         },
         bottomBar = {
-            NavigationBar {
-                NavigationBarItem(
-                    selected = uiState.selectedTab == MainTab.Search,
-                    onClick = { viewModel.selectTab(MainTab.Search) },
-                    icon = { Icon(Icons.Default.Search, contentDescription = null) },
-                    label = { Text("Search") },
-                )
-                NavigationBarItem(
-                    selected = uiState.selectedTab == MainTab.History,
-                    onClick = { viewModel.selectTab(MainTab.History) },
-                    icon = { Icon(Icons.Default.History, contentDescription = null) },
-                    label = { Text("History") },
-                )
+            Column {
+                if (uiState.download.isActive) {
+                    GlobalDownloadBar(download = uiState.download)
+                }
+                NavigationBar {
+                    NavigationBarItem(
+                        selected = uiState.selectedTab == MainTab.Search,
+                        onClick = { viewModel.selectTab(MainTab.Search) },
+                        icon = { Icon(Icons.Default.Search, contentDescription = null) },
+                        label = { Text("Search") },
+                    )
+                    NavigationBarItem(
+                        selected = uiState.selectedTab == MainTab.History,
+                        onClick = { viewModel.selectTab(MainTab.History) },
+                        icon = { Icon(Icons.Default.History, contentDescription = null) },
+                        label = { Text("History") },
+                    )
+                    NavigationBarItem(
+                        selected = uiState.selectedTab == MainTab.Updates,
+                        onClick = { viewModel.selectTab(MainTab.Updates) },
+                        icon = { Icon(Icons.Default.SystemUpdate, contentDescription = null) },
+                        label = { Text("Updates") },
+                    )
+                    NavigationBarItem(
+                        selected = uiState.selectedTab == MainTab.Pending,
+                        onClick = { viewModel.selectTab(MainTab.Pending) },
+                        icon = {
+                            BadgedIcon(
+                                icon = Icons.Default.InstallMobile,
+                                count = uiState.pendingInstalls.size,
+                            )
+                        },
+                        label = { Text("Pending") },
+                    )
+                }
             }
         },
         snackbarHost = { SnackbarHost(snackbarHostState) },
@@ -158,6 +302,16 @@ fun MainScreen() {
                 viewModel = viewModel,
             )
             MainTab.History -> HistoryTab(
+                modifier = Modifier.padding(padding),
+                uiState = uiState,
+                viewModel = viewModel,
+            )
+            MainTab.Updates -> UpdatesTab(
+                modifier = Modifier.padding(padding),
+                uiState = uiState,
+                viewModel = viewModel,
+            )
+            MainTab.Pending -> PendingTab(
                 modifier = Modifier.padding(padding),
                 uiState = uiState,
                 viewModel = viewModel,
@@ -286,6 +440,142 @@ private fun HistoryTab(
                 onInstall = { viewModel.install(record, context) },
                 onDelete = { viewModel.deleteHistoryRecord(record.id) },
             )
+        }
+    }
+}
+
+@Composable
+private fun PendingTab(
+    modifier: Modifier = Modifier,
+    uiState: MainUiState,
+    viewModel: MainViewModel,
+) {
+    val context = LocalContext.current
+
+    if (uiState.pendingInstalls.isEmpty()) {
+        Column(
+            modifier = modifier
+                .fillMaxSize()
+                .padding(16.dp),
+            verticalArrangement = Arrangement.Center,
+            horizontalAlignment = Alignment.CenterHorizontally,
+        ) {
+            Text("Нечего устанавливать")
+            Text(
+                text = "Все скачанные APK уже установлены.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+        return
+    }
+
+    LazyColumn(
+        modifier = modifier.fillMaxSize(),
+        contentPadding = PaddingValues(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        items(uiState.pendingInstalls, key = { it.id }) { record ->
+            HistoryCatalogCard(
+                record = record,
+                downloadedAt = viewModel.formatTimestamp(record.downloadedAt),
+                onInstall = { viewModel.install(record, context) },
+                onDelete = { viewModel.deleteHistoryRecord(record.id) },
+            )
+        }
+    }
+}
+
+@Composable
+private fun UpdatesTab(
+    modifier: Modifier = Modifier,
+    uiState: MainUiState,
+    viewModel: MainViewModel,
+) {
+    val context = LocalContext.current
+    val updates = uiState.updates
+
+    Column(
+        modifier = modifier
+            .fillMaxSize()
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
+    ) {
+        when {
+            updates.isChecking -> {
+                val progress = if (updates.totalCount > 0) {
+                    updates.checkedCount.toFloat() / updates.totalCount
+                } else {
+                    0f
+                }
+                LinearProgressIndicator(
+                    progress = { progress },
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                Text(
+                    text = "Проверено ${updates.checkedCount} из ${updates.totalCount}",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            updates.lastCheckedAt == null -> {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Text("Проверка обновлений")
+                    Text(
+                        text = "Сравним версии установленных приложений с RuStore.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Button(
+                        modifier = Modifier.padding(top = 12.dp),
+                        onClick = { viewModel.checkForUpdates(context.applicationContext) },
+                    ) {
+                        Icon(Icons.Default.Refresh, contentDescription = null)
+                        Text("Проверить обновления")
+                    }
+                }
+            }
+            updates.items.isEmpty() -> {
+                Column(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                ) {
+                    Text("Все приложения обновлены")
+                    Text(
+                        text = "Обновлений через RuStore не найдено.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            else -> {
+                Text(
+                    text = "Доступно обновлений: ${updates.items.size}",
+                    style = MaterialTheme.typography.titleMedium,
+                )
+            }
+        }
+
+        LazyColumn(
+            modifier = Modifier.fillMaxSize(),
+            contentPadding = PaddingValues(bottom = 24.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            items(updates.items, key = { it.packageName }) { item ->
+                UpdateItemCard(
+                    item = item,
+                    isDownloading = uiState.download.packageName == item.packageName &&
+                        uiState.download.status != null &&
+                        uiState.download.error == null,
+                    isReadyToInstall = uiState.download.packageName == item.packageName &&
+                        uiState.download.savedPaths.isNotEmpty(),
+                    onUpdate = { viewModel.download(item.latest, context.applicationContext) },
+                    onInstall = { viewModel.installLatestDownload(context) },
+                )
+            }
         }
     }
 }

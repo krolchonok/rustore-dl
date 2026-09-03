@@ -1,17 +1,22 @@
 package com.rustore.dl
 
 import android.content.Context
-import android.util.Log
-import android.os.Environment
+import android.content.pm.PackageManager
+import android.os.Build
+import androidx.core.content.pm.PackageInfoCompat
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.text.DateFormat
@@ -20,19 +25,45 @@ import java.util.Date
 enum class MainTab {
     Search,
     History,
+    Updates,
+    Pending,
 }
 
 data class DownloadUiState(
     val packageName: String? = null,
+    val appName: String? = null,
     val status: String? = null,
+    val progressPercent: Int? = null,
     val savedPaths: List<String> = emptyList(),
     val recordId: String? = null,
     val error: String? = null,
-)
+) {
+    val isActive: Boolean
+        get() = packageName != null && status != null && error == null && savedPaths.isEmpty()
+}
 
 data class AppListItem(
     val app: AppInfo,
     val isLoadingDetails: Boolean = false,
+)
+
+data class UpdateItem(
+    val packageName: String,
+    val installedAppName: String,
+    val installedVersionName: String?,
+    val installedVersionCode: Long,
+    val latest: AppInfo,
+) {
+    val hasUpdate: Boolean
+        get() = (latest.versionCode ?: 0L) > installedVersionCode
+}
+
+data class UpdatesUiState(
+    val isChecking: Boolean = false,
+    val checkedCount: Int = 0,
+    val totalCount: Int = 0,
+    val items: List<UpdateItem> = emptyList(),
+    val lastCheckedAt: Long? = null,
 )
 
 data class MainUiState(
@@ -43,12 +74,15 @@ data class MainUiState(
     val results: List<AppListItem> = emptyList(),
     val download: DownloadUiState = DownloadUiState(),
     val history: List<DownloadRecord> = emptyList(),
+    val pendingInstalls: List<DownloadRecord> = emptyList(),
+    val updates: UpdatesUiState = UpdatesUiState(),
     val message: String? = null,
 )
 
 class MainViewModel(
     private val client: RuStoreClient = RuStoreClient(),
     private val historyStore: DownloadHistoryStore,
+    private val appContext: Context,
 ) : ViewModel() {
     private val _uiState = MutableStateFlow(MainUiState())
     val uiState: StateFlow<MainUiState> = _uiState.asStateFlow()
@@ -59,11 +93,58 @@ class MainViewModel(
 
     init {
         refreshHistory()
+        viewModelScope.launch {
+            DownloadEventBus.events.collect { event -> handleDownloadEvent(event) }
+        }
+    }
+
+    private fun handleDownloadEvent(event: DownloadEvent) {
+        when (event) {
+            is DownloadEvent.Progress -> {
+                if (_uiState.value.download.packageName == event.packageName) {
+                    _uiState.update {
+                        it.copy(
+                            download = it.download.copy(
+                                status = event.status,
+                                progressPercent = event.percent,
+                            ),
+                        )
+                    }
+                }
+            }
+            is DownloadEvent.Completed -> {
+                refreshHistory()
+                if (_uiState.value.download.packageName == event.packageName) {
+                    _uiState.update {
+                        it.copy(
+                            download = DownloadUiState(
+                                packageName = event.packageName,
+                                appName = event.appName,
+                                status = "Saved",
+                                savedPaths = event.savedPaths,
+                                recordId = event.recordId,
+                                error = null,
+                            ),
+                            message = "Downloaded ${event.appName}",
+                        )
+                    }
+                }
+            }
+            is DownloadEvent.Failed -> {
+                if (_uiState.value.download.packageName == event.packageName) {
+                    _uiState.update {
+                        it.copy(
+                            download = it.download.copy(status = null, error = event.message),
+                        )
+                    }
+                }
+            }
+        }
     }
 
     fun selectTab(tab: MainTab) {
         _uiState.update { it.copy(selectedTab = tab, message = null) }
-        if (tab == MainTab.History) {
+        if (tab == MainTab.History || tab == MainTab.Pending) {
             refreshHistory()
         }
     }
@@ -130,94 +211,85 @@ class MainViewModel(
         }
     }
 
-    fun download(app: AppInfo, context: Context) {
+    fun checkForUpdates(context: Context) {
+        if (_uiState.value.updates.isChecking) {
+            return
+        }
+
         viewModelScope.launch {
+            val installed = withContext(Dispatchers.IO) { InstalledApps.listUpdatable(context) }
             _uiState.update {
                 it.copy(
-                    download = DownloadUiState(
-                        packageName = app.packageName,
-                        status = "Resolving download links…",
-                        savedPaths = emptyList(),
-                        recordId = null,
-                        error = null,
+                    updates = it.updates.copy(
+                        isChecking = true,
+                        checkedCount = 0,
+                        totalCount = installed.size,
+                        items = emptyList(),
                     ),
-                    message = null,
                 )
             }
 
-            try {
-                val artifacts = withContext(Dispatchers.IO) { client.getDownloadArtifacts(app.appId) }
-                val destinationDir = withContext(Dispatchers.IO) {
-                    createDownloadDirectory(context, app.packageName)
-                }
-
-                val savedPaths = mutableListOf<String>()
-                artifacts.forEachIndexed { index, artifact ->
-                    val target = File(destinationDir, artifact.fileName)
-                    _uiState.update {
-                        it.copy(
-                            download = it.download.copy(
-                                status = "Downloading ${index + 1}/${artifacts.size}: ${artifact.fileName}",
-                            ),
-                        )
-                    }
-                    withContext(Dispatchers.IO) {
-                        client.downloadToFile(artifact.url, target) { downloaded, total ->
-                            val label = if (total != null && total > 0) {
-                                val percent = ((downloaded * 100) / total).toInt()
-                                "Downloading ${index + 1}/${artifacts.size}: $percent%"
-                            } else {
-                                "Downloading ${index + 1}/${artifacts.size}: ${downloaded / (1024 * 1024)} MB"
-                            }
-                            _uiState.update { state ->
-                                state.copy(download = state.download.copy(status = label))
-                            }
+            val semaphore = Semaphore(4)
+            val results = withContext(Dispatchers.IO) {
+                installed.map { app ->
+                    async {
+                        val latest = semaphore.withPermit {
+                            runCatching { client.getAppInfo(app.packageName) }.getOrNull()
+                        }
+                        _uiState.update { state ->
+                            state.copy(
+                                updates = state.updates.copy(
+                                    checkedCount = state.updates.checkedCount + 1,
+                                ),
+                            )
+                        }
+                        latest?.let { info ->
+                            UpdateItem(
+                                packageName = app.packageName,
+                                installedAppName = app.appName,
+                                installedVersionName = app.versionName,
+                                installedVersionCode = app.versionCode,
+                                latest = info,
+                            )
                         }
                     }
-                    savedPaths += target.absolutePath
-                }
+                }.awaitAll()
+            }
 
-                val record = DownloadRecord(
-                    id = historyStore.createRecordId(),
-                    packageName = app.packageName,
-                    appName = app.appName,
-                    versionName = app.versionName,
-                    versionCode = app.versionCode,
-                    downloadedAt = System.currentTimeMillis(),
-                    directoryPath = destinationDir.absolutePath,
-                    apkFiles = savedPaths,
-                    isSplit = savedPaths.size > 1,
+            val withUpdates = results.filterNotNull()
+                .filter { it.hasUpdate }
+                .sortedBy { it.installedAppName.lowercase() }
+
+            _uiState.update {
+                it.copy(
+                    updates = it.updates.copy(
+                        isChecking = false,
+                        items = withUpdates,
+                        lastCheckedAt = System.currentTimeMillis(),
+                    ),
                 )
-                historyStore.add(record)
-                refreshHistory()
-
-                _uiState.update {
-                    it.copy(
-                        download = DownloadUiState(
-                            packageName = app.packageName,
-                            status = "Saved",
-                            savedPaths = savedPaths,
-                            recordId = record.id,
-                            error = null,
-                        ),
-                        message = "Downloaded ${app.appName}",
-                    )
-                }
-            } catch (error: Exception) {
-                Log.e(TAG, "Download failed for ${app.packageName}", error)
-                _uiState.update {
-                    it.copy(
-                        download = DownloadUiState(
-                            packageName = app.packageName,
-                            status = null,
-                            savedPaths = emptyList(),
-                            recordId = null,
-                            error = error.message ?: "Download failed",
-                        ),
-                    )
-                }
             }
         }
+    }
+
+    fun download(app: AppInfo, context: Context) {
+        _uiState.update {
+            it.copy(
+                download = DownloadUiState(
+                    packageName = app.packageName,
+                    appName = app.appName,
+                    status = "Подготовка…",
+                    progressPercent = null,
+                    savedPaths = emptyList(),
+                    recordId = null,
+                    error = null,
+                ),
+                message = null,
+            )
+        }
+        // Runs in a foreground service (with a progress notification) so Android
+        // doesn't kill the download if the app is backgrounded or swiped away.
+        DownloadService.start(context.applicationContext, app)
     }
 
     fun install(record: DownloadRecord, context: Context) {
@@ -278,25 +350,35 @@ class MainViewModel(
     private fun refreshHistory() {
         viewModelScope.launch {
             val records = historyStore.load()
-            _uiState.update { it.copy(history = records) }
+            val pending = withContext(Dispatchers.IO) { records.filter(::isPendingInstall) }
+            _uiState.update { it.copy(history = records, pendingInstalls = pending) }
         }
     }
 
-    private fun createDownloadDirectory(context: Context, packageName: String): File {
-        val root = context.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS) ?: context.filesDir
-        val directory = File(root, packageName)
-        if (directory.exists()) {
-            directory.listFiles()?.forEach { it.delete() }
-        } else {
-            directory.mkdirs()
+    private fun isPendingInstall(record: DownloadRecord): Boolean {
+        val packageManager = appContext.packageManager
+        val pkgInfo = try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                packageManager.getPackageInfo(record.packageName, PackageManager.PackageInfoFlags.of(0))
+            } else {
+                @Suppress("DEPRECATION")
+                packageManager.getPackageInfo(record.packageName, 0)
+            }
+        } catch (error: PackageManager.NameNotFoundException) {
+            return true
         }
-        return directory
+        val installedVersionCode = PackageInfoCompat.getLongVersionCode(pkgInfo)
+        val recordVersionCode = record.versionCode ?: return true
+        return installedVersionCode < recordVersionCode
     }
 
     class Factory(private val context: Context) : ViewModelProvider.Factory {
         @Suppress("UNCHECKED_CAST")
         override fun <T : ViewModel> create(modelClass: Class<T>): T {
-            return MainViewModel(historyStore = DownloadHistoryStore(context)) as T
+            return MainViewModel(
+                historyStore = DownloadHistoryStore(context),
+                appContext = context.applicationContext,
+            ) as T
         }
     }
 }

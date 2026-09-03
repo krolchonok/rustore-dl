@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  RuStore's own CDN (static-m.rustore.ru) serves APKs with a certificate chained to
+  the Russian Trusted Root CA (Минцифры России), which isn't in Android's default
+  trust store. Without this, APK downloads fail with
+  CertPathValidatorException: Trust anchor for certification path not found.
+-->
+<network-security-config>
+    <base-config>
+        <trust-anchors>
+            <certificates src="system" />
+            <certificates src="@raw/russian_trusted_root_ca" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>

@@ -318,6 +318,85 @@ private fun ExpandedDetails(
 }
 
 @Composable
+fun UpdateItemCard(
+    item: UpdateItem,
+    isDownloading: Boolean,
+    isReadyToInstall: Boolean,
+    onUpdate: () -> Unit,
+    onInstall: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    Card(
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surfaceContainerHigh,
+        ),
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            horizontalArrangement = Arrangement.spacedBy(12.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            AsyncImage(
+                model = item.latest.iconUrl,
+                contentDescription = item.installedAppName,
+                modifier = Modifier
+                    .size(56.dp)
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(MaterialTheme.colorScheme.surfaceVariant),
+                contentScale = ContentScale.Crop,
+            )
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = item.installedAppName,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                Text(
+                    text = item.packageName,
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                val installedVersion = item.installedVersionName ?: item.installedVersionCode.toString()
+                val latestVersion = item.latest.versionName ?: item.latest.versionCode?.toString() ?: "?"
+                Text(
+                    text = "$installedVersion → $latestVersion",
+                    modifier = Modifier.padding(top = 4.dp),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                    fontWeight = FontWeight.Medium,
+                )
+            }
+
+            when {
+                isDownloading -> {
+                    CircularProgressIndicator(modifier = Modifier.size(24.dp), strokeWidth = 2.dp)
+                }
+                isReadyToInstall -> {
+                    Button(onClick = onInstall) {
+                        Text("Установить")
+                    }
+                }
+                else -> {
+                    Button(onClick = onUpdate) {
+                        Icon(Icons.Default.Download, contentDescription = null)
+                        Text("Обновить")
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 fun HistoryCatalogCard(
     record: DownloadRecord,
     downloadedAt: String,
