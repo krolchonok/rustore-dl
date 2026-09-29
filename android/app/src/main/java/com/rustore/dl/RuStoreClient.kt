@@ -9,10 +9,17 @@ import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import android.annotation.SuppressLint
 import java.io.File
+import java.security.SecureRandom
+import java.security.cert.X509Certificate
 import java.util.concurrent.TimeUnit
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
+import javax.net.ssl.SSLContext
+import javax.net.ssl.SSLSocketFactory
+import javax.net.ssl.TrustManager
+import javax.net.ssl.X509TrustManager
 import kotlin.random.Random
 
 @Serializable
@@ -452,8 +459,28 @@ class RuStoreClient(
         private fun encode(value: String): String =
             java.net.URLEncoder.encode(value, Charsets.UTF_8.name())
 
-        private fun defaultHttpClient(): OkHttpClient {
+        @SuppressLint("CustomX509TrustManager")
+        private val trustAllCerts = arrayOf<TrustManager>(
+            object : X509TrustManager {
+                @SuppressLint("TrustAllX509TrustManager")
+                override fun checkClientTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
+                @SuppressLint("TrustAllX509TrustManager")
+                override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {}
+                override fun getAcceptedIssuers(): Array<X509Certificate> = arrayOf()
+            }
+        )
+
+        private val trustAllSslSocketFactory: SSLSocketFactory by lazy {
+            val sslContext = SSLContext.getInstance("TLS")
+            sslContext.init(null, trustAllCerts, SecureRandom())
+            sslContext.socketFactory
+        }
+
+        fun defaultHttpClient(): OkHttpClient {
+            val trustManager = trustAllCerts[0] as X509TrustManager
             return OkHttpClient.Builder()
+                .sslSocketFactory(trustAllSslSocketFactory, trustManager)
+                .hostnameVerifier { _, _ -> true }
                 .connectTimeout(30, TimeUnit.SECONDS)
                 .readTimeout(15, TimeUnit.MINUTES)
                 .writeTimeout(15, TimeUnit.MINUTES)

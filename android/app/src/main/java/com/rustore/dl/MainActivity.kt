@@ -11,6 +11,10 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.core.app.NotificationManagerCompat
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.ViewModelProvider
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
@@ -152,6 +156,11 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        coil.Coil.setImageLoader(
+            coil.ImageLoader.Builder(this)
+                .okHttpClient(RuStoreClient.defaultHttpClient())
+                .build()
+        )
         enableEdgeToEdge()
         requestNotificationPermissionIfNeeded()
         setContent {
@@ -193,7 +202,18 @@ fun MainScreen() {
     val viewModel: MainViewModel = viewModel(factory = MainViewModel.Factory(context))
     val uiState by viewModel.uiState.collectAsState()
     val snackbarHostState = remember { SnackbarHostState() }
+    val lifecycleOwner = LocalLifecycleOwner.current
     var showClearHistoryDialog by remember { mutableStateOf(false) }
+
+    DisposableEffect(lifecycleOwner, snackbarHostState) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_PAUSE) {
+                snackbarHostState.currentSnackbarData?.dismiss()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
 
     LaunchedEffect(uiState.message) {
         uiState.message?.let { message ->
