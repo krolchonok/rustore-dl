@@ -2,6 +2,15 @@
 
 All notable changes to this project are documented in this file.
 
+## [0.3.2] - 2026-10-10
+
+### Added
+- Background downloads, update checks, and pending installs
+
+### Fixed
+- Bypass SSL/TLS certificate verification for RuStore endpoints and CDN
+- Dismiss download snackbar when leaving app
+
 ## [0.3.1] - 2026-09-01
 
 ### Fixed
